@@ -22,6 +22,18 @@ import {
   type PlaybackBackend,
   setPlaybackBackend,
 } from "../api/playback";
+import {
+  getLosslessCapabilities,
+  getLosslessDevices,
+  getLosslessPreferLocal,
+  setLosslessPreferLocal,
+  getLocalLosslessTracks,
+  pickLocalAudioFolder,
+  scanLosslessFolder,
+  pickLocalAudioFile,
+  playLocalFile,
+} from "../api/lossless";
+import type { LosslessCapabilitiesReport, AudioDeviceFormatInfo, LocalLosslessTrack } from "../types/lossless";
 import { usePlaybackBackend } from "../hooks/usePlaybackBackend";
 import { toast } from "../store/toast.store";
 import { errMsg } from "../lib/err";
@@ -639,6 +651,190 @@ function PlaybackCard() {
   );
 }
 
+function LosslessAudioCard() {
+  const qc = useQueryClient();
+  const [folder, setFolder] = useState<string>(() => localStorage.getItem("musique_lossless_folder") || "");
+  const [isScanning, setIsScanning] = useState(false);
+
+  const { data: caps } = useQuery<LosslessCapabilitiesReport>({
+    queryKey: ["lossless-capabilities"],
+    queryFn: getLosslessCapabilities,
+    staleTime: 60_000,
+  });
+
+  const { data: devices } = useQuery<AudioDeviceFormatInfo[]>({
+    queryKey: ["lossless-devices"],
+    queryFn: getLosslessDevices,
+    staleTime: 60_000,
+  });
+
+  const { data: preferLocal = true } = useQuery<boolean>({
+    queryKey: ["lossless-prefer-local"],
+    queryFn: getLosslessPreferLocal,
+  });
+
+  const { data: localTracks = [] } = useQuery<LocalLosslessTrack[]>({
+    queryKey: ["lossless-local-tracks"],
+    queryFn: getLocalLosslessTracks,
+  });
+
+  const handlePickFolder = async () => {
+    try {
+      const picked = await pickLocalAudioFolder();
+      if (!picked) return;
+      setFolder(picked);
+      localStorage.setItem("musique_lossless_folder", picked);
+      setIsScanning(true);
+      const scanned = await scanLosslessFolder(picked);
+      await qc.invalidateQueries({ queryKey: ["lossless-local-tracks"] });
+      toast(`Discovered ${scanned.length} lossless audio files!`);
+    } catch (e) {
+      toast.error(errMsg(e));
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleRescan = async () => {
+    if (!folder) {
+      handlePickFolder();
+      return;
+    }
+    try {
+      setIsScanning(true);
+      const scanned = await scanLosslessFolder(folder);
+      await qc.invalidateQueries({ queryKey: ["lossless-local-tracks"] });
+      toast(`Library updated: ${scanned.length} lossless audio tracks indexed.`);
+    } catch (e) {
+      toast.error(errMsg(e));
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  const handleTogglePrefer = async (val: boolean) => {
+    try {
+      await setLosslessPreferLocal(val);
+      await qc.invalidateQueries({ queryKey: ["lossless-prefer-local"] });
+      toast(val ? "Prefer local lossless copies enabled" : "Prefer local lossless copies disabled");
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  };
+
+  const handlePlayDirect = async () => {
+    try {
+      const file = await pickLocalAudioFile();
+      if (!file) return;
+      await playLocalFile(file);
+      toast(`Playing lossless file: ${file.split(/[\\/]/).pop()}`);
+    } catch (e) {
+      toast.error(errMsg(e));
+    }
+  };
+
+  const activeDevice = caps?.active_device ?? devices?.find((d) => d.is_default) ?? null;
+
+  return (
+    <Card title="Lossless & Hi-Res Audio">
+      {/* Transparency Note */}
+      <div
+        style={{
+          background: "linear-gradient(135deg, rgba(14, 165, 233, 0.08) 0%, rgba(2, 132, 199, 0.04) 100%)",
+          border: "1px solid rgba(14, 165, 233, 0.22)",
+          borderRadius: 12,
+          padding: "14px 16px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 6,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 16 }}>💎</span>
+          <span style={{ fontSize: 13, fontWeight: 700, color: "#38bdf8" }}>
+            Genuine Bit-Perfect Lossless Architecture
+          </span>
+        </div>
+        <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5, color: "var(--color-text-dim)" }}>
+          {caps?.spotify_limitation_reason ??
+            "Spotify AP servers deliver audio exclusively in lossy Ogg Vorbis up to 320 kbps. Musique's built-in lossless engine delivers genuine bit-perfect playback (FLAC, ALAC, WAV up to 192 kHz / 24-bit) with zero lossy transcoding by pairing Spotify metadata with your local lossless files."}
+        </p>
+      </div>
+
+      <SettingRow
+        label="Prefer local lossless copies"
+        hint="When playing a Spotify track, automatically upgrade to your matching local FLAC or WAV file for bit-perfect sound."
+        control={
+          <Switch
+            checked={preferLocal}
+            onChange={handleTogglePrefer}
+          />
+        }
+      />
+
+      <Divider />
+
+      <SettingRow
+        label="Lossless music directory"
+        hint={
+          folder
+            ? `${folder} (${localTracks.length} lossless tracks indexed)`
+            : "Select a folder containing FLAC, WAV, or ALAC files to link with your Spotify library."
+        }
+        control={
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <GhostBtn subtle onClick={handlePickFolder} disabled={isScanning}>
+              {folder ? "Change Folder" : "Browse Folder..."}
+            </GhostBtn>
+            {folder && (
+              <GhostBtn subtle onClick={handleRescan} disabled={isScanning}>
+                {isScanning ? "Scanning..." : "Rescan"}
+              </GhostBtn>
+            )}
+          </div>
+        }
+      />
+
+      <Divider />
+
+      <SettingRow
+        label="Audio output hardware"
+        hint={
+          activeDevice
+            ? `${activeDevice.name} · Default rate: ${(activeDevice.default_sample_rate / 1000).toFixed(1)} kHz · Supported audiophile rates: ${activeDevice.supported_sample_rates.map((r) => `${(r / 1000).toFixed(1)}k`).join(", ")}`
+            : "Scanning system audio devices..."
+        }
+        control={
+          <span
+            style={{
+              padding: "4px 10px",
+              borderRadius: 6,
+              background: "rgba(52, 211, 153, 0.15)",
+              color: "#34d399",
+              fontSize: 12,
+              fontWeight: 700,
+            }}
+          >
+            Bit-Perfect Ready
+          </span>
+        }
+      />
+
+      <Divider />
+
+      <SettingRow
+        label="Direct file playback"
+        hint="Open and play any local FLAC, WAV, or ALAC audio file instantly without adding it to a playlist."
+        control={
+          <PrimaryBtn onClick={handlePlayDirect}>
+            Play Audio File...
+          </PrimaryBtn>
+        }
+      />
+    </Card>
+  );
+}
+
 function GeneralCard() {
   const notifyOnTrack = usePrefsStore((s) => s.notifyOnTrack);
   const setNotifyOnTrack = usePrefsStore((s) => s.setNotifyOnTrack);
@@ -1189,6 +1385,7 @@ export default function Settings() {
       </h1>
 
       <PlaybackCard />
+      <LosslessAudioCard />
       <GeneralCard />
       <FeaturesCard />
       <AppearanceCard />

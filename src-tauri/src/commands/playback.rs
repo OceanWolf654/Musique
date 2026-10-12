@@ -51,6 +51,43 @@ async fn save_setting(pool: &sqlx::SqlitePool, key: &str, value: &str) -> Result
     Ok(())
 }
 
+async fn silence_lossless(app: &AppHandle) {
+    let lossless = app.state::<AppState>().lossless.clone();
+    let guard = lossless.lock().await;
+    if let Some(player) = guard.as_ref() {
+        if player.is_playing() {
+            let _ = player.pause();
+        }
+    }
+}
+
+pub(crate) async fn set_and_emit_spotify_format(app: &AppHandle) {
+    use tauri::Emitter;
+    let pool = app.state::<AppState>().db.clone();
+    let quality_str = setting_value(&pool, "audio_quality")
+        .await
+        .unwrap_or_else(|| "320".to_string());
+    let bitrate_kbps = quality_str.parse::<u32>().unwrap_or(320);
+    let output_sample_rate = crate::lossless::devices::get_default_device_info()
+        .map(|d| d.default_sample_rate)
+        .unwrap_or(48000);
+    let format = crate::lossless::types::AudioFormatInfo::spotify(bitrate_kbps, output_sample_rate);
+    let current_format = app.state::<AppState>().current_format.clone();
+    *current_format.lock().await = Some(format.clone());
+    let _ = app.emit("audio:format-changed", &format);
+}
+
+pub(crate) async fn set_and_emit_youtube_format(app: &AppHandle) {
+    use tauri::Emitter;
+    let output_sample_rate = crate::lossless::devices::get_default_device_info()
+        .map(|d| d.default_sample_rate)
+        .unwrap_or(48000);
+    let format = crate::lossless::types::AudioFormatInfo::youtube(output_sample_rate);
+    let current_format = app.state::<AppState>().current_format.clone();
+    *current_format.lock().await = Some(format.clone());
+    let _ = app.emit("audio:format-changed", &format);
+}
+
 async fn ensure_inner(app: &AppHandle) -> Result<(), AppError> {
     ensure_inner_with(app, true).await
 }
@@ -716,12 +753,53 @@ pub async fn warm_session_if_possible(app: AppHandle) {
 #[tauri::command]
 pub async fn play_track(app: AppHandle, id: String, context_uri: Option<String>) -> Result<(), AppError> {
     eprintln!("[playback cmd] play_track id={id} context={context_uri:?}");
+    let pool = app.state::<AppState>().db.clone();
+
+    // 1. Direct local file or local ID playback
+    if id.starts_with("local:") {
+        let row: Option<(String,)> = sqlx::query_as("SELECT file_path FROM local_tracks WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten();
+        if let Some((path,)) = row {
+            crate::commands::lossless::play_local_file(app.clone(), path).await?;
+            return Ok(());
+        }
+    } else if std::path::Path::new(&id).exists() {
+        crate::commands::lossless::play_local_file(app.clone(), id).await?;
+        return Ok(());
+    }
+
+    // 2. Check if local lossless copy exists and prefer_local is enabled
+    let prefer_local: bool = sqlx::query_as::<_, (String,)>("SELECT value FROM settings WHERE key = 'lossless_prefer_local'")
+        .fetch_optional(&pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|(v,)| v == "1")
+        .unwrap_or(true);
+
+    if prefer_local {
+        if let Ok(query) = match_query(&app, &pool, &id).await {
+            let artist_ref = query.artists.first().map(|s| s.as_str()).unwrap_or("");
+            if let Ok(Some(matched_local)) = crate::lossless::find_lossless_match(&pool, &query.title, artist_ref).await {
+                log::info!("[lossless] Auto-upgraded Spotify track to local lossless copy: {} by {}", matched_local.title, matched_local.artist);
+                crate::commands::lossless::play_local_file(app.clone(), matched_local.file_path).await?;
+                return Ok(());
+            }
+        }
+    }
+
+    silence_lossless(&app).await;
 
     if uses_youtube(&app).await {
         // A resolution failure here is a real, expected outcome (no acceptable
         // YouTube match). It propagates to the frontend as an error naming the
         // track rather than silently playing something else.
         yt_play(&app, &id, 0).await?;
+        set_and_emit_youtube_format(&app).await;
     } else {
         ensure_inner(&app).await?;
         let uri      = crate::playback::track_uri(&id)?;
@@ -731,9 +809,10 @@ pub async fn play_track(app: AppHandle, id: String, context_uri: Option<String>)
             inner.set_play_context(&uri, context_uri);
             inner.play_uri(uri, 0)?;
         }
+        drop(guard);
+        set_and_emit_spotify_format(&app).await;
     }
 
-    let pool = app.state::<AppState>().db.clone();
     let track_id = id.clone();
     tokio::spawn(async move {
         let now = std::time::SystemTime::now()
@@ -781,6 +860,17 @@ pub async fn retry_play_track(app: AppHandle, id: String, context_uri: Option<St
 
 #[tauri::command]
 pub async fn pause_playback(app: AppHandle) -> Result<(), AppError> {
+    {
+        let lossless = app.state::<AppState>().lossless.clone();
+        let guard = lossless.lock().await;
+        if let Some(player) = guard.as_ref() {
+            if player.is_playing() {
+                player.pause()?;
+                return Ok(());
+            }
+        }
+    }
+
     if uses_youtube(&app).await {
         // cancels a load still downloading, so it can't start audio after this
         yt_claim();
@@ -802,6 +892,17 @@ pub async fn pause_playback(app: AppHandle) -> Result<(), AppError> {
 
 #[tauri::command]
 pub async fn resume_playback(app: AppHandle) -> Result<(), AppError> {
+    {
+        let lossless = app.state::<AppState>().lossless.clone();
+        let guard = lossless.lock().await;
+        if let Some(player) = guard.as_ref() {
+            if player.current_track().is_some() && !player.is_ended() {
+                player.resume()?;
+                return Ok(());
+            }
+        }
+    }
+
     if uses_youtube(&app).await {
         // After end-of-track the decoder queue is drained, so there is nothing
         // to un-pause - the track has to be fetched and decoded again.
@@ -855,6 +956,10 @@ pub async fn resume_or_play(
     context_uri: Option<String>,
 ) -> Result<(), AppError> {
     eprintln!("[playback cmd] resume_or_play id={id} pos={position_ms}");
+
+    if id.starts_with("local:") || std::path::Path::new(&id).exists() {
+        return play_track(app, id, context_uri).await;
+    }
 
     if uses_youtube(&app).await {
         // Un-pause when the very same track is still loaded and live; anything
@@ -917,6 +1022,14 @@ pub async fn resume_or_play(
 
 #[tauri::command]
 pub async fn stop_playback(app: AppHandle) -> Result<(), AppError> {
+    {
+        let lossless = app.state::<AppState>().lossless.clone();
+        let guard = lossless.lock().await;
+        if let Some(player) = guard.as_ref() {
+            player.stop()?;
+        }
+    }
+
     if uses_youtube(&app).await {
         yt_claim();
         // Unlike the Spirc path there is no connect-state to keep consistent,
@@ -943,6 +1056,16 @@ pub async fn stop_playback(app: AppHandle) -> Result<(), AppError> {
 
 #[tauri::command]
 pub async fn seek_playback(app: AppHandle, position_ms: u32) -> Result<(), AppError> {
+    {
+        let lossless = app.state::<AppState>().lossless.clone();
+        let guard = lossless.lock().await;
+        if let Some(player) = guard.as_ref() {
+            if player.current_track().is_some() {
+                return player.seek(position_ms);
+            }
+        }
+    }
+
     if uses_youtube(&app).await {
         return yt_seek(&app, position_ms).await;
     }
@@ -981,6 +1104,7 @@ pub async fn set_volume(app: AppHandle, level: u8) -> Result<(), AppError> {
     let pool     = s.db.clone();
     let playback = s.playback.clone();
     let yt       = s.yt.clone();
+    let lossless = s.lossless.clone();
     drop(s);
 
     let level_f = level as f64 / 100.0;
@@ -993,7 +1117,7 @@ pub async fn set_volume(app: AppHandle, level: u8) -> Result<(), AppError> {
     }
     drop(guard);
 
-    // The two backends own separate volume state, so both are updated
+    // The backends own separate volume state, so all are updated
     // unconditionally rather than only the active one - otherwise switching
     // backends would jump the volume back to whatever the other last saw.
     let yt_guard = yt.lock().await;
@@ -1001,6 +1125,12 @@ pub async fn set_volume(app: AppHandle, level: u8) -> Result<(), AppError> {
         player.set_level(level_f);
     }
     drop(yt_guard);
+
+    let loss_guard = lossless.lock().await;
+    if let Some(player) = loss_guard.as_ref() {
+        player.set_level(level_f);
+    }
+    drop(loss_guard);
 
     save_setting(&pool, "player_volume", &level.to_string()).await
 }
@@ -1011,6 +1141,7 @@ pub async fn set_muted(app: AppHandle, muted: bool) -> Result<(), AppError> {
     let pool     = s.db.clone();
     let playback = s.playback.clone();
     let yt       = s.yt.clone();
+    let lossless = s.lossless.clone();
     drop(s);
 
     let guard = playback.lock().await;
@@ -1024,6 +1155,12 @@ pub async fn set_muted(app: AppHandle, muted: bool) -> Result<(), AppError> {
         player.set_muted(muted);
     }
     drop(yt_guard);
+
+    let loss_guard = lossless.lock().await;
+    if let Some(player) = loss_guard.as_ref() {
+        player.set_muted(muted);
+    }
+    drop(loss_guard);
 
     save_setting(&pool, "player_muted", if muted { "1" } else { "0" }).await
 }

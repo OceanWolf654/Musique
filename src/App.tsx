@@ -23,6 +23,8 @@ const ProfilePage = lazy(() => import("./pages/ProfilePage"));
 const ShowPage = lazy(() => import("./pages/ShowPage"));
 const StatsPage = lazy(() => import("./pages/StatsPage"));
 import { getCredentials, validateCredentials } from "./api/credentials";
+import { getCurrentAudioFormat } from "./api/lossless";
+import type { AudioFormatInfo } from "./types/lossless";
 import { useAuth } from "./hooks/useAuth";
 import {
   setVolume,
@@ -430,6 +432,22 @@ Home recs so they're cached before the user gets there
       listen("media:prev", () => transportPrev()),
     ]);
   }, []);
+
+  // sync audio format changes (lossless vs lossy)
+  const setAudioFormat = usePlayerStore((s) => s.setAudioFormat);
+  useEffect(() => {
+    getCurrentAudioFormat()
+      .then((fmt) => {
+        if (fmt) setAudioFormat(fmt);
+      })
+      .catch(() => {});
+
+    return cleanupAsyncListeners([
+      listen<AudioFormatInfo>("audio:format-changed", (e) => {
+        setAudioFormat(e.payload);
+      }),
+    ]);
+  }, [setAudioFormat]);
 
   return null;
 }

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, memo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { useQueryClient } from "@tanstack/react-query";
 import { motion, AnimatePresence, animate, useMotionValue, useTransform } from "framer-motion";
 import { prefetchAlbum, prefetchArtist } from "../../lib/prefetch";
@@ -21,6 +21,7 @@ import { useDevices } from "../../hooks/useDevices";
 import { CoverArt } from "../ui/CoverArt";
 import { Tooltip } from "../ui/Tooltip";
 import { fmtMs } from "../../utils/fmt";
+import { LosslessBadge } from "../ui/LosslessBadge";
 import { usePlayerControls } from "../../hooks/usePlayerControls";
 import { gpuLayer, zTransform, EASE_OUT, PRESS } from "../../lib/motion";
 import { SpeedControl, SkipSeconds } from "../ui/SpeedControl";
@@ -681,6 +682,7 @@ export function PlayerBar({ immersive = false }: { immersive?: boolean }) {
   const storeSetVolume  = usePlayerStore((s) => s.setVolume);
   const storeSetMuted   = usePlayerStore((s) => s.setMuted);
   const setImmersiveOpen = usePlayerStore((s) => s.setImmersiveOpen);
+  const navigate = useNavigate();
 
   const { togglePlay, next: handleNext, prev: handlePrev, seek: doSeek } = usePlayerControls();
   const isEpisode = usePlayerStore((s) => isEpisodeId(s.currentId));
@@ -1147,6 +1149,7 @@ export function PlayerBar({ immersive = false }: { immersive?: boolean }) {
 
         {/* Right: Volume with responsive slider */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end", position: "relative", flexShrink: 0 }}>
+          <LosslessBadge compact={!showInlineVolume} onOpenSettings={() => navigate("/settings")} />
           {isEpisode && !isRemotePlayback && <SpeedControl compact />}
           <Tooltip label={showInlineVolume ? (muted ? "Unmute" : `Mute (${volume}%)`) : (volPopupOpen ? "Close volume" : `Volume (${volume}%)`)}>
             <span ref={volBtnRef}>

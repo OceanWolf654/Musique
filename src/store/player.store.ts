@@ -3,6 +3,7 @@ import { persist } from "zustand/middleware";
 import { dedupedStorage } from "../lib/persistStorage";
 import type { TrackItem } from "../types/spotify";
 import type { SpotifyDevice, RemotePlaybackState, RemoteRepeat } from "../api/connect";
+import type { AudioFormatInfo } from "../types/lossless";
 
 interface PlayerStore {
   devicesOpen: boolean;
@@ -96,6 +97,8 @@ interface PlayerStore {
   setVolume:       (v: number) => void;
   setMuted:        (m: boolean) => void;
   setSessionReady: () => void;
+  audioFormat:     AudioFormatInfo | null;
+  setAudioFormat:  (format: AudioFormatInfo | null) => void;
 }
 
 export const usePlayerStore = create<PlayerStore>()(
@@ -235,6 +238,9 @@ export const usePlayerStore = create<PlayerStore>()(
       setTargetState:  (state) => set({ targetState: state, targetStateTime: Date.now() }),
       clearTargetState: () => set({ targetState: null, targetStateTime: 0 }),
 
+      audioFormat: null,
+      setAudioFormat: (format) => set({ audioFormat: format }),
+
       clear: () =>
         set({
           isPlaying: false,
@@ -253,6 +259,7 @@ export const usePlayerStore = create<PlayerStore>()(
           devicesOpen: false,
           isRemotePlayback: false,
           activeDevice: null,
+          audioFormat: null,
         }),
 
       setSessionReady: () => set({ sessionReady: true }),

@@ -528,6 +528,7 @@ mod stretch;
 mod youtube;
 mod state;
 mod mem_trim;
+pub mod lossless;
 
 fn install_panic_logger() {
     let default_hook = std::panic::take_hook();
@@ -796,6 +797,8 @@ pub fn run() {
                     auth: Arc::new(RwLock::new(auth_state)),
                     playback: Arc::new(tokio::sync::Mutex::new(None)),
                     yt: Arc::new(tokio::sync::Mutex::new(None)),
+                    lossless: Arc::new(tokio::sync::Mutex::new(None)),
+                    current_format: Arc::new(tokio::sync::Mutex::new(None)),
                     media_tx,
                     sync_gate: Arc::new(RwLock::new(())),
                     backdrop_active,
@@ -993,6 +996,17 @@ pub fn run() {
             commands::playback::get_audio_cache_limit,
             commands::playback::set_audio_cache_limit,
             commands::playback::get_output_latency_ms,
+            commands::lossless::get_current_audio_format,
+            commands::lossless::get_lossless_capabilities,
+            commands::lossless::get_lossless_devices,
+            commands::lossless::probe_local_audio_file,
+            commands::lossless::play_local_file,
+            commands::lossless::pick_local_audio_file,
+            commands::lossless::pick_local_audio_folder,
+            commands::lossless::scan_lossless_folder,
+            commands::lossless::get_local_lossless_tracks,
+            commands::lossless::set_lossless_prefer_local,
+            commands::lossless::get_lossless_prefer_local,
             commands::library::sync_library,
             commands::library::get_liked_songs,
             commands::library::get_liked_songs_count,

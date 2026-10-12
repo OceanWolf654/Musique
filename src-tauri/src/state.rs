@@ -17,6 +17,8 @@ pub struct AppState {
     /// Exactly one of the two drives audio at a time - see
     /// `commands::playback::uses_youtube`.
     pub yt:       Arc<Mutex<Option<crate::playback::youtube::YtPlayback>>>,
+    pub lossless: Arc<Mutex<Option<crate::lossless::player::LosslessPlayer>>>,
+    pub current_format: Arc<Mutex<Option<crate::lossless::types::AudioFormatInfo>>>,
     pub media_tx: mpsc::SyncSender<MediaMsg>,
 
     /// Held for reading while a library sync runs, and for writing while a
